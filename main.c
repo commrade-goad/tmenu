@@ -11,14 +11,19 @@
 #include "helpa.h"
 #include "config.h"
 
-// TODO: exec mode, flag, regex, ranking
+// TODO: exec mode, flag, regex
 
 #define CCTRL(c) ((c) & 0x1E)
 
 typedef struct {
-    HStrView *dt;
-    size_t    cp;
-    size_t    sz;
+    HStrView entry;
+    i32      score;
+} Match;
+
+typedef struct {
+    Match  *dt;
+    size_t  cp;
+    size_t  sz;
 } Entry;
 
 static Entry entry          = {0};
@@ -79,6 +84,29 @@ bool hstrview_contain(HStrView *str, HStrView *cont) {
     return false;
 }
 
+int hstrview_score(HStrView *str, HStrView *cont) {
+    if (cont->sz == 0) return 0;
+    if (cont->sz > str->sz) return 9999;
+    int best = 9999;
+
+    for (size_t i = 0; i <= str->sz - cont->sz; i++) {
+        int score = 0;
+        bool match = true;
+        for (size_t j = 0; j < cont->sz; j++) {
+            if (str->dt[i+j] != cont->dt[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            score = (int)i;
+            score += (int)(str->sz - cont->sz);
+            if (score < best) best = score;
+        }
+    }
+    return best;
+}
+
 void reset_selected(Entry *cur) {
     if (cur->sz > 0 && cur->sz <= selected)      selected     = cur->sz - 1;
     if (cur->sz > 0 && cur->sz <= scroll_offset) scroll_offset = cur->sz - 1;
@@ -89,14 +117,16 @@ void split_entry(HStr *str, char split) {
     helpa_da_foreach(*str, c) {
         if (*c == split) {
             HStrView sv = { .dt = before, .sz = (i32)(c - before) };
+            Match m = { .entry = sv, .score = 0 };
             before = c + 1;
-            helpa_da_append(entry, sv);
+            helpa_da_append(entry, m);
         }
     }
     if (before < str->dt + str->sz) {
         HStrView sv = { .dt = before, .sz = (i32)((str->dt + str->sz) - before) };
         if (sv.sz <= 0 || (sv.sz == 1 && isspace(*sv.dt))) return;
-        helpa_da_append(entry, sv);
+        Match m = { .entry = sv, .score = 0 };
+        helpa_da_append(entry, m);
     }
 }
 
@@ -114,6 +144,35 @@ static void line_handler(char *line) {
         return;
     }
     running = false;
+}
+
+// int match_cmp(const void *a, const void *b) {
+//     const Match *ma = (const Match*)a;
+//     const Match *mb = (const Match*)b;
+//
+//     // lower score = better
+//     if (ma->score < mb->score) return -1;
+//     if (ma->score > mb->score) return 1;
+//
+//     // tie-breaker (optional): shorter string first
+//     if (ma->entry.sz < mb->entry.sz) return -1;
+//     if (ma->entry.sz > mb->entry.sz) return 1;
+//
+//     return 0;
+// }
+
+int match_cmp(const void *a, const void *b) {
+    const Match *ma = (const Match*)a;
+    const Match *mb = (const Match*)b;
+
+    if (ma->score != mb->score)
+        return ma->score - mb->score;
+
+    size_t min = ma->entry.sz < mb->entry.sz ? ma->entry.sz : mb->entry.sz;
+    int cmp = memcmp(ma->entry.dt, mb->entry.dt, min);
+    if (cmp != 0) return cmp;
+
+    return (int)(ma->entry.sz - mb->entry.sz);
 }
 
 int main(int argc, char **argv) {
@@ -182,6 +241,7 @@ int main(int argc, char **argv) {
 
     Entry search_results   = {0};
     Entry *current_display = &entry;
+    bool changed = true;
 
     while (running) {
         const char *line_buf = rl_line_buffer ? rl_line_buffer : "";
@@ -194,16 +254,26 @@ int main(int argc, char **argv) {
 
         size_t max_visible = (my > input_rows) ? (my - input_rows) : 0;
 
-        if (line_sz > 0) {
-            search_results.sz = 0;
-            HStrView converted = { .dt = (u8*)line_buf, .sz = line_sz };
-            helpa_da_foreach(entry, items) {
-                if (hstrview_contain(items, &converted))
-                    helpa_da_append(search_results, *items);
+        if (changed) {
+            if (line_sz > 0) {
+                search_results.sz = 0;
+                HStrView converted = { .dt = (u8*)line_buf, .sz = line_sz };
+                helpa_da_foreach(entry, items) {
+                    int score = hstrview_score(&items->entry, &converted);
+
+                    if (score < 9999) {
+                        Match m = { .entry = items->entry, .score = score };
+                        helpa_da_append(search_results, m);
+                    }
+                    // if (hstrview_contain(&items->entry, &converted))
+                    //     helpa_da_append(search_results, *items);
+                }
+                current_display = &search_results;
+                qsort(search_results.dt, search_results.sz, sizeof(Match), match_cmp);
+            } else {
+                current_display = &entry;
             }
-            current_display = &search_results;
-        } else {
-            current_display = &entry;
+            changed = false;
         }
 
         reset_selected(current_display);
@@ -218,9 +288,9 @@ int main(int argc, char **argv) {
         size_t row = input_rows, index = 0;
         helpa_da_foreach(*current_display, items) {
             if (index >= scroll_offset && index < scroll_offset + max_visible) {
-                int len = (int)items->sz;
+                int len = (int)items->entry.sz;
                 if ((size_t)len > mx) len = (int)mx;
-                mvprintw((int)row, 0, "%.*s", len, items->dt);
+                mvprintw((int)row, 0, "%.*s", len, items->entry.dt);
                 if (index == selected)
                     mvchgat((int)row, 0, -1, A_NORMAL, 1, NULL);
                 row++;
@@ -269,10 +339,12 @@ int main(int argc, char **argv) {
             case KEY_BACKSPACE:
             case 127:
             case '\b': {
+                changed = true;
                 forward_to_readline(127);
             } break;
 
             default: {
+                changed = true;
                 forward_to_readline(ch);
             } break;
         }
@@ -284,7 +356,7 @@ int main(int argc, char **argv) {
     if (dont_echo) return current_display->sz > 0 ? 0 : 1;
 
     if (current_display->sz > 0) {
-        HStrView sel = current_display->dt[selected];
+        HStrView sel = current_display->dt[selected].entry;
         printf("%.*s\n", (int)sel.sz, sel.dt);
         return 0;
     }

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+if [ ! -f path_binary.txt ]; then
+    echo $PATH | tr ':' '\n' | while read dir; do
+        [ -d "$dir" ] && find "$dir" -maxdepth 1 -type f -executable -printf '%f\n' 2>/dev/null
+    done | sort -u > path_binary.txt
+fi
+
+exec $(cat path_binary.txt | ./main)
