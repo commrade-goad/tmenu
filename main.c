@@ -11,6 +11,7 @@
 #include "helpa.h"
 #include "config.h"
 
+#define VERSION "0.1"
 #define CCTRL(c) ((c) & 0x1E)
 
 typedef struct {
@@ -34,6 +35,25 @@ static bool running             = true;
 static bool dont_echo           = false;
 
 static size_t mx = 80, my = 24;
+
+static void print_help() {
+    printf(
+    "tmenu <flag> [stdin]\n"
+    "  NOTE: right now it only support input from stdin.\n"
+    "  FLAG:\n"
+    "    -bg [-1..7]   # color from the terminal\n"
+    "    -fg [-1..7]   # color from the terminal\n"
+    "    -prompt [str] # a string for the prompt\n"
+    "    -char [chr]   # a char that will be used for splitting\n"
+    "    -help         # print help\n"
+    "    -version      # print version\n"
+    );
+    exit(0);
+}
+static void print_version() {
+    printf("tmenu version %s\n", VERSION);
+    exit(0);
+}
 
 static int rl_input_avail(void) { return rl_input_avail_flag; }
 
@@ -168,10 +188,35 @@ int main(int argc, char **argv) {
 
     if (argc > 1) {
         for(int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "-bg") == 0 && i + 1 < argc) bg_color = atoi(argv[++i]);
-            if (strcmp(argv[i], "-fg") == 0 && i + 1 < argc) fg_color = atoi(argv[++i]);
-            if (strcmp(argv[i], "-prompt") == 0 && i + 1 < argc) prompt = argv[++i];
-            if (strcmp(argv[i], "-char") == 0 && i + 1 < argc) splitch = *argv[++i];
+            if (strcmp(argv[i], "-bg") == 0 && i + 1 < argc) {
+                bg_color = atoi(argv[++i]);
+                if (*argv[i] != '0' && bg_color == 0) {
+                    fprintf(stderr, "warning: invalid bg color `%s` using the default one.\n", argv[i]);
+                    bg_color = SELECT_COLOR;
+                }
+                continue;
+            } else
+            if (strcmp(argv[i], "-fg") == 0 && i + 1 < argc) {
+                fg_color = atoi(argv[++i]);
+                if (*argv[i] != '0' && fg_color == 0) {
+                    fprintf(stderr, "warning: invalid fg color `%s` using the default one.\n", argv[i]);
+                    fg_color = -1;
+                }
+                continue;
+            } else
+            if (strcmp(argv[i], "-prompt") == 0 && i + 1 < argc) {
+                prompt = argv[++i];
+                continue;
+            } else
+            if (strcmp(argv[i], "-char") == 0 && i + 1 < argc) {
+                splitch = *argv[++i];
+                continue;
+            } else
+            if (strcmp(argv[i], "-help") == 0) print_help();
+            else if (strcmp(argv[i], "-version") == 0) print_version();
+            else {
+                fprintf(stderr, "warning: invalid or unfinished flag '%s' ignored.\n", argv[i]);
+            }
         }
     }
 
@@ -198,7 +243,7 @@ int main(int argc, char **argv) {
         FILE *tty_in  = fopen("/dev/tty", "r");
         FILE *tty_out = fopen("/dev/tty", "w");
         if (!tty_in || !tty_out) {
-            fprintf(stderr, "failed to open /dev/tty\n");
+            fprintf(stderr, "warning: failed to open /dev/tty\n");
             return 1;
         }
         scr = newterm(NULL, tty_out, tty_in);
