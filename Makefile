@@ -1,2 +1,2 @@
 all: main.c
-	cc -o main main.c -Wall -Wextra -ggdb -lncurses -ltinfo -lreadline
+	cc -o tmenu main.c -Wall -Wextra -lncurses -ltinfo -lreadline -march=native -flto
