@@ -1,10 +1,19 @@
+#define _XOPEN_SOURCE 700
+
 #include <stdio.h>
 #include <unistd.h>
+#include <locale.h>
 #include <curses.h>
+#include <readline/readline.h>
+#include <readline/history.h>
+#include <wchar.h>
+#include <wctype.h>
 #include "helpa.h"
 #include "config.h"
 
-// TODO: custom key, custom color, exec mode, prompt, C-a, C-e text manipulation
+// TODO: exec mode, flag, regex, ranking
+
+#define CCTRL(c) ((c) & 0x1E)
 
 typedef struct {
     HStrView *dt;
@@ -12,226 +21,274 @@ typedef struct {
     size_t    sz;
 } Entry;
 
-static Entry entry = {0};
-static size_t selected = 0;
+static Entry entry          = {0};
+static size_t selected      = 0;
 static size_t scroll_offset = 0;
 
-#define CTRL(c) ((c) & 0x1F)
+static bool rl_input_avail_flag = false;
+static u8   rl_input_char       = 0;
+static bool running             = true;
+static bool dont_echo           = false;
+
+static size_t mx = 80, my = 24;
+
+static int rl_input_avail(void) { return rl_input_avail_flag; }
+
+static int rl_getc_cb(FILE *dummy) {
+    (void)dummy;
+    rl_input_avail_flag = false;
+    return rl_input_char;
+}
+
+static void forward_to_readline(int c) {
+    rl_input_char       = (unsigned char)c;
+    rl_input_avail_flag = true;
+    rl_callback_read_char();
+}
+
+static size_t strnwidth(const char *s, size_t n, size_t offset) {
+    mbstate_t st;
+    wchar_t wc;
+    size_t wc_len, width = 0;
+    memset(&st, 0, sizeof st);
+    for (size_t i = 0; i < n; i += wc_len) {
+        wc_len = mbrtowc(&wc, s + i, MB_CUR_MAX, &st);
+        if (wc_len == 0) break;
+        if (wc_len == (size_t)-1 || wc_len == (size_t)-2) {
+            width += strnlen(s + i, n - i);
+            break;
+        }
+        if (wc == '\t')
+            width = ((width + offset + 8) & ~7) - offset;
+        else
+            width += iswcntrl(wc) ? 2 : (size_t)(wcwidth(wc) > 0 ? wcwidth(wc) : 0);
+    }
+    return width;
+}
 
 bool hstrview_contain(HStrView *str, HStrView *cont) {
     if (cont->sz == 0) return true;
     if (cont->sz > str->sz) return false;
-
     for (size_t i = 0; i <= str->sz - cont->sz; i++) {
         bool match = true;
         for (size_t j = 0; j < cont->sz; j++) {
-            if (str->dt[i + j] != cont->dt[j]) {
-                match = false;
-                break;
-            }
+            if (str->dt[i+j] != cont->dt[j]) { match = false; break; }
         }
         if (match) return true;
     }
     return false;
 }
 
-void reset_selected(Entry *current_display) {
-    if (current_display->sz > 0 && current_display->sz <= selected) { selected = current_display->sz - 1; }
-    if (current_display->sz > 0 && current_display->sz <= scroll_offset) { scroll_offset = current_display->sz - 1; }
+void reset_selected(Entry *cur) {
+    if (cur->sz > 0 && cur->sz <= selected)      selected     = cur->sz - 1;
+    if (cur->sz > 0 && cur->sz <= scroll_offset) scroll_offset = cur->sz - 1;
 }
 
 void split_entry(HStr *str, char split) {
     u8 *before = str->dt;
     helpa_da_foreach(*str, c) {
         if (*c == split) {
-            HStrView strv = {
-                .dt = before,
-                .sz = (i32) (c - before),
-            };
+            HStrView sv = { .dt = before, .sz = (i32)(c - before) };
             before = c + 1;
-            helpa_da_append(entry, strv);
+            helpa_da_append(entry, sv);
         }
     }
     if (before < str->dt + str->sz) {
-        HStrView strv = {
-            .dt = before,
-            .sz = (i32)((str->dt + str->sz) - before),
-        };
-        if (strv.sz <= 0 ||
-            (strv.sz == 1 && isspace(*strv.dt))) {
-            return;
-        }
-        helpa_da_append(entry, strv);
+        HStrView sv = { .dt = before, .sz = (i32)((str->dt + str->sz) - before) };
+        if (sv.sz <= 0 || (sv.sz == 1 && isspace(*sv.dt))) return;
+        helpa_da_append(entry, sv);
     }
-    return;
+}
+
+static void redisplay(void) {
+    // readline calls this whenever the line changes
+    // we'll do the actual draw in the main loop, so just mark dirty
+    // (alternatively draw here — but doing it in the loop keeps things simple)
+}
+
+static void line_handler(char *line) {
+    if (!line) {
+        // Ctrl-D on empty line → treat as cancel
+        dont_echo = true;
+        running   = false;
+        return;
+    }
+    running = false;
 }
 
 int main(int argc, char **argv) {
-    HStr buffer = {
-        .dt = NULL,
-        .cp = 1024,
-        .sz = 0,
-    };
-    buffer.dt = malloc(buffer.cp);
+    if (!setlocale(LC_ALL, ""))
+        fprintf(stderr, "warning: failed to set locale\n");
 
-    ssize_t n ;
+    // Read stdin
+    HStr buffer = { .dt = NULL, .cp = 1024, .sz = 0 };
+    buffer.dt = malloc(buffer.cp);
+    ssize_t n;
     do {
         n = read(0, buffer.dt + buffer.sz, buffer.cp - buffer.sz);
-        buffer.sz += n;
-        if (buffer.sz == buffer.cp) {
-            buffer.cp *= 2;
-            buffer.dt = realloc(buffer.dt, buffer.cp);
+        if (n > 0) {
+            buffer.sz += n;
+            if (buffer.sz == buffer.cp) {
+                buffer.cp *= 2;
+                buffer.dt = realloc(buffer.dt, buffer.cp);
+            }
         }
     } while (n > 0);
 
     split_entry(&buffer, '\n');
 
-    // init ncurses stuff
+    // Init ncurses
     SCREEN *scr = NULL;
-    if (!isatty(0))  {
+    if (!isatty(0)) {
         FILE *tty_in  = fopen("/dev/tty", "r");
         FILE *tty_out = fopen("/dev/tty", "w");
-
         if (!tty_in || !tty_out) {
             fprintf(stderr, "failed to open /dev/tty\n");
             return 1;
         }
-
         scr = newterm(NULL, tty_out, tty_in);
         set_term(scr);
     } else {
         initscr();
     }
 
-    // proper setup
     start_color();
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
+
     timeout(25);
     set_escdelay(25);
     use_default_colors();
-    // nodelay(stdscr, TRUE);
 
-    size_t mx = getmaxx(stdscr);
-    size_t my = getmaxy(stdscr);
-
-    bool running = true;
-    HStr user_buffer = {0};
-    mvcur(0, 4, 0, 4);
-
-    Entry search_results = {0};      // Dedicated list for filtered items
-    Entry *current_display = &entry; // Point to original list by default
+    mx = getmaxx(stdscr);
+    my = getmaxy(stdscr);
 
     init_pair(1, -1, SELECT_COLOR);
 
-    bool dont_echo = false;
+    // Init readline (callback / alternate interface)
+    // Tell readline not to mess with terminal settings — ncurses owns the terminal
+    rl_catch_signals        = 0;
+    rl_catch_sigwinch       = 0;
+    rl_deprep_term_function = NULL;
+    rl_prep_term_function   = NULL;
+    rl_change_environment   = 0;
+
+    rl_getc_function        = rl_getc_cb;
+    rl_input_available_hook = rl_input_avail;
+    rl_redisplay_function   = redisplay;
+
+    rl_callback_handler_install(PROMPT, line_handler);
+
+    Entry search_results   = {0};
+    Entry *current_display = &entry;
 
     while (running) {
-        i32 ch = getch();
-        switch (ch) {
-        case KEY_RESIZE: {
-            mx = getmaxx(stdscr);
-            my = getmaxy(stdscr);
-        } break;
-        case KEY_BACKSPACE: {
-            if (user_buffer.sz > 0) {
-                hstr_pop(&user_buffer);
-                // selected = 0;
-                // scroll_offset = 0;
-                reset_selected(current_display);
-            }
-        } break;
-        case CTRL('n'): { // Ctrl + N (Move Down)
-            if (current_display->sz > 0 && selected < current_display->sz - 1) {
-                selected++;
-            }
-        } break;
+        const char *line_buf = rl_line_buffer ? rl_line_buffer : "";
+        size_t      line_sz  = strlen(line_buf);
 
-        case CTRL('p'): { // Ctrl + P (Move Up)
-            if (selected > 0) {
-                selected--;
-            }
-        } break;
+        size_t prompt_width = strlen(PROMPT);
+        size_t input_len    = prompt_width + strnwidth(line_buf, line_sz, prompt_width);
+        size_t input_rows   = (input_len + mx - 1) / mx;
+        if (input_rows == 0) input_rows = 1;
 
-        case CTRL('g'):
-        case 27: { // this is escape key
-            dont_echo = true;
-            running = false;
-        } break;
+        size_t max_visible = (my > input_rows) ? (my - input_rows) : 0;
 
-        default: {
-            if (((char)ch >= '!' && (char)ch <= '~') || (char)ch == ' ') {
-                hstr_push(&user_buffer, (char)ch);
-                // selected      = 0;
-                // scroll_offset = 0;
-                reset_selected(current_display);
-            }
-            if ((char)ch == '\n') running = false;
-        } break;
-        }
-
-        size_t input_len = user_buffer.sz + strlen(PROMPT);
-        size_t input_rows = (input_len + mx - 1) / mx;
-        size_t i = input_rows;
-
-        size_t max_visible_items = (my > input_rows) ? (my - input_rows) : 0;
-        if (selected < scroll_offset) {
-            scroll_offset = selected;
-        } else if (selected >= scroll_offset + max_visible_items) {
-            scroll_offset = selected - max_visible_items + 1;
-        }
-
-        if (user_buffer.sz > 0) {
+        if (line_sz > 0) {
             search_results.sz = 0;
-            HStrView converted = {
-                .dt = user_buffer.dt,
-                .sz = user_buffer.sz,
-            };
-
+            HStrView converted = { .dt = (u8*)line_buf, .sz = line_sz };
             helpa_da_foreach(entry, items) {
-                if (hstrview_contain(items, &converted)) {
+                if (hstrview_contain(items, &converted))
                     helpa_da_append(search_results, *items);
-                }
             }
-
             current_display = &search_results;
-            wclear(stdscr);
         } else {
             current_display = &entry;
-            wclear(stdscr);
         }
 
         reset_selected(current_display);
 
-        size_t index = 0;
-        helpa_da_foreach(*current_display, items) {
-            if (index >= scroll_offset && index < scroll_offset + max_visible_items) {
-                i32 len = (i32)items->sz;
-                if (items->sz > mx) len = (i32)mx;
+        if (selected < scroll_offset)
+            scroll_offset = selected;
+        else if (selected >= scroll_offset + max_visible && max_visible > 0)
+            scroll_offset = selected - max_visible + 1;
 
-                mvprintw(i, 0, "%.*s\n", len, items->dt);
-                if (index == selected) {
-                    mvchgat(i, 0, -1, A_NORMAL, 1, NULL);
-                }
-                i++;
+        wclear(stdscr);
+
+        size_t row = input_rows, index = 0;
+        helpa_da_foreach(*current_display, items) {
+            if (index >= scroll_offset && index < scroll_offset + max_visible) {
+                int len = (int)items->sz;
+                if ((size_t)len > mx) len = (int)mx;
+                mvprintw((int)row, 0, "%.*s", len, items->dt);
+                if (index == selected)
+                    mvchgat((int)row, 0, -1, A_NORMAL, 1, NULL);
+                row++;
             }
             index++;
         }
-        mvprintw(0, 0, "%s%.*s", PROMPT, (i32)user_buffer.sz, user_buffer.dt);
 
+        mvprintw(0, 0, "%s%s", PROMPT, line_buf);
         wclrtoeol(stdscr);
+
+        size_t cursor_col = prompt_width +
+            strnwidth(line_buf, (size_t)rl_point, prompt_width);
+        if (cursor_col < mx)
+            move(0, (int)cursor_col);
+
         refresh();
+
+        int ch = getch();
+        if (!running) break;
+
+        switch (ch) {
+            case ERR: {} break;
+            case KEY_RESIZE: {
+                mx = getmaxx(stdscr);
+                my = getmaxy(stdscr);
+            } break;
+            // C-n / C-p: navigate list (intercept before readline sees them)
+            case CCTRL('n'): {
+                if (current_display->sz > 0 && selected < current_display->sz - 1)
+                    selected++;
+            } break;
+
+            case CCTRL('p'): {
+                if (selected > 0)
+                    selected--;
+            } break;
+
+            case CCTRL('g'):
+            case 27: {
+                dont_echo = true;
+                running   = false;
+            } break;
+
+            // DEL (what most terminals actually send)
+            // ^H
+            case KEY_BACKSPACE:
+            case 127:
+            case '\b': {
+                forward_to_readline(127);
+            } break;
+
+            default: {
+                forward_to_readline(ch);
+            } break;
+        }
     }
 
     endwin();
+    rl_callback_handler_remove();
 
     if (dont_echo) return current_display->sz > 0 ? 0 : 1;
+
     if (current_display->sz > 0) {
-        HStrView selected_entry = current_display->dt[selected];
-        printf("%.*s\n", (i32)selected_entry.sz, selected_entry.dt);
+        HStrView sel = current_display->dt[selected];
+        printf("%.*s\n", (int)sel.sz, sel.dt);
         return 0;
     }
-    printf("%.*s\n", (i32)user_buffer.sz, user_buffer.dt);
+    if (rl_line_buffer && *rl_line_buffer)
+        printf("%s\n", rl_line_buffer);
     return 1;
 }
