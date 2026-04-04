@@ -11,8 +11,6 @@
 #include "helpa.h"
 #include "config.h"
 
-// TODO: exec mode, flag, regex
-
 #define CCTRL(c) ((c) & 0x1E)
 
 typedef struct {
@@ -146,21 +144,6 @@ static void line_handler(char *line) {
     running = false;
 }
 
-// int match_cmp(const void *a, const void *b) {
-//     const Match *ma = (const Match*)a;
-//     const Match *mb = (const Match*)b;
-//
-//     // lower score = better
-//     if (ma->score < mb->score) return -1;
-//     if (ma->score > mb->score) return 1;
-//
-//     // tie-breaker (optional): shorter string first
-//     if (ma->entry.sz < mb->entry.sz) return -1;
-//     if (ma->entry.sz > mb->entry.sz) return 1;
-//
-//     return 0;
-// }
-
 int match_cmp(const void *a, const void *b) {
     const Match *ma = (const Match*)a;
     const Match *mb = (const Match*)b;
@@ -176,8 +159,21 @@ int match_cmp(const void *a, const void *b) {
 }
 
 int main(int argc, char **argv) {
-    if (!setlocale(LC_ALL, ""))
-        fprintf(stderr, "warning: failed to set locale\n");
+    if (!setlocale(LC_ALL, "")) fprintf(stderr, "warning: failed to set locale\n");
+
+    int fg_color = -1;
+    int bg_color = SELECT_COLOR;
+    char *prompt = PROMPT;
+    char splitch = '\n';
+
+    if (argc > 1) {
+        for(int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "-bg") == 0 && i + 1 < argc) bg_color = atoi(argv[++i]);
+            if (strcmp(argv[i], "-fg") == 0 && i + 1 < argc) fg_color = atoi(argv[++i]);
+            if (strcmp(argv[i], "-prompt") == 0 && i + 1 < argc) prompt = argv[++i];
+            if (strcmp(argv[i], "-char") == 0 && i + 1 < argc) splitch = *argv[++i];
+        }
+    }
 
     // Read stdin
     HStr buffer = { .dt = NULL, .cp = 1024, .sz = 0 };
@@ -194,7 +190,7 @@ int main(int argc, char **argv) {
         }
     } while (n > 0);
 
-    split_entry(&buffer, '\n');
+    split_entry(&buffer, splitch);
 
     // Init ncurses
     SCREEN *scr = NULL;
@@ -223,7 +219,7 @@ int main(int argc, char **argv) {
     mx = getmaxx(stdscr);
     my = getmaxy(stdscr);
 
-    init_pair(1, -1, SELECT_COLOR);
+    init_pair(1, fg_color, bg_color);
 
     // Init readline (callback / alternate interface)
     // Tell readline not to mess with terminal settings — ncurses owns the terminal
@@ -237,7 +233,7 @@ int main(int argc, char **argv) {
     rl_input_available_hook = rl_input_avail;
     rl_redisplay_function   = redisplay;
 
-    rl_callback_handler_install(PROMPT, line_handler);
+    rl_callback_handler_install(prompt, line_handler);
 
     Entry search_results   = {0};
     Entry *current_display = &entry;
@@ -247,7 +243,7 @@ int main(int argc, char **argv) {
         const char *line_buf = rl_line_buffer ? rl_line_buffer : "";
         size_t      line_sz  = strlen(line_buf);
 
-        size_t prompt_width = strlen(PROMPT);
+        size_t prompt_width = strlen(prompt);
         size_t input_len    = prompt_width + strnwidth(line_buf, line_sz, prompt_width);
         size_t input_rows   = (input_len + mx - 1) / mx;
         if (input_rows == 0) input_rows = 1;
@@ -298,7 +294,7 @@ int main(int argc, char **argv) {
             index++;
         }
 
-        mvprintw(0, 0, "%s%s", PROMPT, line_buf);
+        mvprintw(0, 0, "%s%s", prompt, line_buf);
         wclrtoeol(stdscr);
 
         size_t cursor_col = prompt_width +
@@ -328,7 +324,6 @@ int main(int argc, char **argv) {
                     selected--;
             } break;
 
-            case CCTRL('g'):
             case 27: {
                 dont_echo = true;
                 running   = false;
