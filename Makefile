@@ -1,2 +1,5 @@
-all: main.c
-	cc -o tmenu main.c -Wall -Wextra -lncurses -ltinfo -lreadline -march=native -flto -O2
+debug: main.c
+	cc -o tmenu main.c -Wall -Wextra -lncursesw -ltinfow -lreadline -ggdb
+
+release: main.c
+	cc -o tmenu main.c -Wall -Wextra -lncursesw -ltinfow -lreadline -march=native -flto -O2

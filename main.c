@@ -1,9 +1,13 @@
 #define _XOPEN_SOURCE 700
+#define _XOPEN_SOURCE_EXTENDED 1
+#define NCURSES_WIDECHAR 1
 
+#include <limits.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <locale.h>
-#include <curses.h>
+// #include <curses.h>
+#include <ncursesw/curses.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <wchar.h>
@@ -74,17 +78,22 @@ static size_t strnwidth(const char *s, size_t n, size_t offset) {
     wchar_t wc;
     size_t wc_len, width = 0;
     memset(&st, 0, sizeof st);
-    for (size_t i = 0; i < n; i += wc_len) {
-        wc_len = mbrtowc(&wc, s + i, MB_CUR_MAX, &st);
+    for (size_t i = 0; i < n; ) {
+        wc_len = mbrtowc(&wc, s + i, n - i, &st);
         if (wc_len == 0) break;
         if (wc_len == (size_t)-1 || wc_len == (size_t)-2) {
-            width += strnlen(s + i, n - i);
-            break;
+            width++;
+            i++;
+            memset(&st, 0, sizeof st);
+            continue;
         }
         if (wc == '\t')
-            width = ((width + offset + 8) & ~7) - offset;
-        else
-            width += iswcntrl(wc) ? 2 : (size_t)(wcwidth(wc) > 0 ? wcwidth(wc) : 0);
+        width = ((width + offset + 8) & ~7) - offset;
+        else {
+            int w = wcwidth(wc);
+            width += (iswcntrl(wc)) ? 2 : (w > 0 ? (size_t)w : 0);
+        }
+        i += wc_len;
     }
     return width;
 }
@@ -332,7 +341,7 @@ int main(int argc, char **argv) {
             if (index >= scroll_offset && index < scroll_offset + max_visible) {
                 int len = (int)items->entry.sz;
                 if ((size_t)len > mx) len = (int)mx;
-                mvprintw((int)row, 0, "%.*s", len, items->entry.dt);
+                mvaddnstr((int)row, 0, (const char *)items->entry.dt, len);
                 if (index == selected)
                     mvchgat((int)row, 0, -1, A_NORMAL, 1, NULL);
                 row++;
@@ -340,7 +349,8 @@ int main(int argc, char **argv) {
             index++;
         }
 
-        mvprintw(0, 0, "%s%s", prompt, line_buf);
+        mvaddstr(0, 0, prompt);
+        addstr(line_buf);
         wclrtoeol(stdscr);
 
         size_t cursor_col = prompt_width +
@@ -350,48 +360,70 @@ int main(int argc, char **argv) {
 
         refresh();
 
-        int ch = getch();
+        wint_t wch = 0;
+        int ret = get_wch(&wch);
         if (!running) break;
 
-        switch (ch) {
-            case ERR: {} break;
-            case KEY_RESIZE: {
-                mx = getmaxx(stdscr);
-                my = getmaxy(stdscr);
-            } break;
-            // C-n / C-p: navigate list (intercept before readline sees them)
-            case CCTRL('n'): {
-                if (current_display->sz > 0 && selected < current_display->sz - 1) {
-                    selected++;
-                    wclear(stdscr);
-                }
-            } break;
+        if (ret == ERR) {
+            /* timeout — nothing to do */
+        } else if (ret == KEY_CODE_YES) {
+            /* special/function key */
+            switch ((int)wch) {
+                case KEY_RESIZE: {
+                    mx = getmaxx(stdscr);
+                    my = getmaxy(stdscr);
+                } break;
+                case KEY_BACKSPACE: {
+                    changed = true;
+                    forward_to_readline(127);
+                } break;
+                default: break;
+            }
+        } else {
+            /* ret == OK: real character (may be wide / emoji) */
+            switch ((int)wch) {
+                case CCTRL('n'): {
+                    if (current_display->sz > 0 && selected < current_display->sz - 1) {
+                        selected++;
+                        wclear(stdscr);
+                    }
+                } break;
 
-            case CCTRL('p'): {
-                if (selected > 0) {
-                    selected--;
-                    wclear(stdscr);
-                }
-            } break;
+                case CCTRL('p'): {
+                    if (selected > 0) {
+                        selected--;
+                        wclear(stdscr);
+                    }
+                } break;
 
-            case 27: {
-                dont_echo = true;
-                running   = false;
-            } break;
+                case 27: {
+                    dont_echo = true;
+                    running   = false;
+                } break;
 
-            // DEL (what most terminals actually send)
-            // ^H
-            case KEY_BACKSPACE:
-            case 127:
-            case '\b': {
-                changed = true;
-                forward_to_readline(127);
-            } break;
+                case 127:
+                case '\b': {
+                    changed = true;
+                    forward_to_readline(127);
+                } break;
 
-            default: {
-                changed = true;
-                forward_to_readline(ch);
-            } break;
+                default: {
+                    changed = true;
+                    if ((wchar_t)wch < 0x80) {
+                        /* plain ASCII — feed directly */
+                        forward_to_readline((unsigned char)wch);
+                    } else {
+                        /* multi-byte: encode to UTF-8 and feed byte-by-byte */
+                        char buf[MB_LEN_MAX + 1];
+                        mbstate_t st;
+                        memset(&st, 0, sizeof st);
+                        size_t n = wcrtomb(buf, (wchar_t)wch, &st);
+                        if (n != (size_t)-1)
+                            for (size_t i = 0; i < n; i++)
+                                forward_to_readline((unsigned char)buf[i]);
+                    }
+                } break;
+            }
         }
     }
 
