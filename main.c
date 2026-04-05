@@ -385,15 +385,15 @@ int main(int argc, char **argv) {
                 case CCTRL('n'): {
                     if (current_display->sz > 0 && selected < current_display->sz - 1) {
                         selected++;
-                        wclear(stdscr);
-                    }
+                    } else selected = 0;
+                    wclear(stdscr);
                 } break;
 
                 case CCTRL('p'): {
                     if (selected > 0) {
                         selected--;
-                        wclear(stdscr);
-                    }
+                    } else selected = current_display->sz -1;
+                    wclear(stdscr);
                 } break;
 
                 case 27: {
