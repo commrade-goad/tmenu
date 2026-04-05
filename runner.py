@@ -41,7 +41,7 @@ try:
 except subprocess.CalledProcessError:
     sys.exit(1)
 except FileNotFoundError:
-    print("Error: ./tmenu was not found in this directory.", file=sys.stderr)
+    print("Error: tmenu was not found in path envvar.", file=sys.stderr)
     sys.exit(1)
 
 if not prog:
