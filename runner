@@ -6,11 +6,13 @@ if [ ! -f path_binary.txt ]; then
     done | sort -u > path_binary.txt
 fi
 
-PROG=$(./main < path_binary.txt)
+PROG=$(./tmenu < path_binary.txt)
 SUCCESS=$?
 
 if [ "$SUCCESS" -ne 0 ]; then
     exit 1
 fi
 
-"$PROG" &
+# sh -c "$PROG" >/dev/null 2>&1 & disown
+setsid sh -c "$PROG" >/dev/null 2>&1 &
+sleep 0.2

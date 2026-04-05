@@ -314,6 +314,7 @@ int main(int argc, char **argv) {
             } else {
                 current_display = &entry;
             }
+            wclear(stdscr);
             changed = false;
         }
 
@@ -324,7 +325,7 @@ int main(int argc, char **argv) {
         else if (selected >= scroll_offset + max_visible && max_visible > 0)
             scroll_offset = selected - max_visible + 1;
 
-        wclear(stdscr);
+        // wclear was here
 
         size_t row = input_rows, index = 0;
         helpa_da_foreach(*current_display, items) {
@@ -360,13 +361,17 @@ int main(int argc, char **argv) {
             } break;
             // C-n / C-p: navigate list (intercept before readline sees them)
             case CCTRL('n'): {
-                if (current_display->sz > 0 && selected < current_display->sz - 1)
+                if (current_display->sz > 0 && selected < current_display->sz - 1) {
                     selected++;
+                    wclear(stdscr);
+                }
             } break;
 
             case CCTRL('p'): {
-                if (selected > 0)
+                if (selected > 0) {
                     selected--;
+                    wclear(stdscr);
+                }
             } break;
 
             case 27: {
