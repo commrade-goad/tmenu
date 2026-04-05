@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 
-if [ ! -f path_binary.txt ]; then
+cachename="tmenu_path"
+fullpath="$XDG_CACHE_HOME/$cachename"
+
+if [ ! -f "$cachename" ]; then
     echo "$PATH" | tr ':' '\n' | while read -r dir; do
         [ -d "$dir" ] && find "$dir" -maxdepth 1 -type f -executable -printf '%p\n' 2>/dev/null
-    done | sort -u > path_binary.txt
+    done | sort -u > "$fullpath"
 fi
 
-PROG=$(./tmenu < path_binary.txt)
+PROG=$(tmenu < "$fullpath")
 SUCCESS=$?
 
 if [ "$SUCCESS" -ne 0 ]; then
@@ -15,4 +18,4 @@ fi
 
 # sh -c "$PROG" >/dev/null 2>&1 & disown
 setsid sh -c "$PROG" >/dev/null 2>&1 &
-sleep 0.2
+sleep 0.1
