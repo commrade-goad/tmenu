@@ -190,7 +190,7 @@ int match_cmp(const void *a, const void *b) {
 int main(int argc, char **argv) {
     if (!setlocale(LC_ALL, "")) fprintf(stderr, "warning: failed to set locale\n");
 
-    int fg_color = -1;
+    int fg_color = FG_SELECT_COLOR;
     int bg_color = SELECT_COLOR;
     char *prompt = PROMPT;
     char splitch = '\n';
