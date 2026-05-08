@@ -189,34 +189,36 @@ int match_cmp(const void *a, const void *b) {
     return (int)(ma->entry.sz - mb->entry.sz);
 }
 
-static HStr execute_preview(const char *cmd, HStrView selected_item) {
+static HStr execute_preview(const char *cmd, HStrView selected_item, size_t preview_w, size_t preview_h) {
     HStr out = {0};
     if (!cmd) return out;
 
-    // Replace "{}" with the selected_item
     HStr final_cmd = {0};
-    const char *placeholder = strstr(cmd, "{}");
-    if (placeholder) {
-        size_t prefix_len = placeholder - cmd;
-        HStrView prefix = { .dt = (const u8*)cmd, .sz = prefix_len };
-        hstr_append_view(&final_cmd, prefix);
 
-        // Escape the selected item for shell just to be safe, or just append it
-        // To be safe with shell, wrap in single quotes and replace ' with '\''
-        hstr_push(&final_cmd, '\'');
-        for (size_t i = 0; i < selected_item.sz; i++) {
-            if (selected_item.dt[i] == '\'') {
-                hstr_append_cstr(&final_cmd, "'\\''");
-            } else {
-                hstr_push(&final_cmd, selected_item.dt[i]);
+    for (size_t i = 0; cmd[i] != '\0';) {
+        if (cmd[i] == '{' && cmd[i+1] == '}' ) {
+            // Escape the selected item for shell just to be safe, or just append it
+            // To be safe with shell, wrap in single quotes and replace ' with '\''
+            hstr_push(&final_cmd, '\'');
+            for (size_t j = 0; j < selected_item.sz; j++) {
+                if (selected_item.dt[j] == '\'') {
+                    hstr_append_cstr(&final_cmd, "'\\''");
+                } else {
+                    hstr_push(&final_cmd, selected_item.dt[j]);
+                }
             }
+            hstr_push(&final_cmd, '\'');
+            i += 2;
+        } else if (cmd[i] == '{' && cmd[i+1] == 'w' && cmd[i+2] == '}') {
+            hstr_printf(&final_cmd, "%zu", preview_w);
+            i += 3;
+        } else if (cmd[i] == '{' && cmd[i+1] == 'h' && cmd[i+2] == '}') {
+            hstr_printf(&final_cmd, "%zu", preview_h);
+            i += 3;
+        } else {
+            hstr_push(&final_cmd, cmd[i]);
+            i++;
         }
-        hstr_push(&final_cmd, '\'');
-
-        HStrView suffix = { .dt = (const u8*)(placeholder + 2), .sz = strlen(placeholder + 2) };
-        hstr_append_view(&final_cmd, suffix);
-    } else {
-        hstr_append_cstr(&final_cmd, cmd);
     }
 
     // Ensure stderr is discarded to prevent mixing output
@@ -451,7 +453,7 @@ int main(int argc, char **argv) {
 
             if (current_display->sz > 0) {
                 HStrView sel = current_display->dt[selected].entry;
-                HStr preview_out = execute_preview(preview_cmd, sel);
+                HStr preview_out = execute_preview(preview_cmd, sel, preview_w, my);
 
                 if (preview_out.sz > 0) {
                     size_t p_y = 1;
