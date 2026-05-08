@@ -49,6 +49,8 @@ static void print_help() {
     "    -fg [-1..7]   # color from the terminal\n"
     "    -prompt [str] # a string for the prompt\n"
     "    -char [chr]   # a char that will be used for splitting\n"
+    "    -preview [cmd]       # a command to run for the preview\n"
+    "    -preview-ratio [r]   # preview ratio (e.g., 3:4), default 3:4\n"
     "    -help         # print help\n"
     "    -version      # print version\n"
     );
@@ -187,6 +189,54 @@ int match_cmp(const void *a, const void *b) {
     return (int)(ma->entry.sz - mb->entry.sz);
 }
 
+static HStr execute_preview(const char *cmd, HStrView selected_item) {
+    HStr out = {0};
+    if (!cmd) return out;
+
+    // Replace "{}" with the selected_item
+    HStr final_cmd = {0};
+    const char *placeholder = strstr(cmd, "{}");
+    if (placeholder) {
+        size_t prefix_len = placeholder - cmd;
+        HStrView prefix = { .dt = (const u8*)cmd, .sz = prefix_len };
+        hstr_append_view(&final_cmd, prefix);
+
+        // Escape the selected item for shell just to be safe, or just append it
+        // To be safe with shell, wrap in single quotes and replace ' with '\''
+        hstr_push(&final_cmd, '\'');
+        for (size_t i = 0; i < selected_item.sz; i++) {
+            if (selected_item.dt[i] == '\'') {
+                hstr_append_cstr(&final_cmd, "'\\''");
+            } else {
+                hstr_push(&final_cmd, selected_item.dt[i]);
+            }
+        }
+        hstr_push(&final_cmd, '\'');
+
+        HStrView suffix = { .dt = (const u8*)(placeholder + 2), .sz = strlen(placeholder + 2) };
+        hstr_append_view(&final_cmd, suffix);
+    } else {
+        hstr_append_cstr(&final_cmd, cmd);
+    }
+
+    // Ensure stderr is discarded to prevent mixing output
+    hstr_append_cstr(&final_cmd, " 2>/dev/null");
+
+    FILE *f = popen((const char *)final_cmd.dt, "r");
+    if (f) {
+        char buf[1024];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+            HStrView v = { .dt = (const u8*)buf, .sz = n };
+            hstr_append_view(&out, v);
+        }
+        pclose(f);
+    }
+
+    hstr_free(&final_cmd);
+    return out;
+}
+
 int main(int argc, char **argv) {
     if (!setlocale(LC_ALL, "")) fprintf(stderr, "warning: failed to set locale\n");
 
@@ -194,6 +244,10 @@ int main(int argc, char **argv) {
     int bg_color = SELECT_COLOR;
     char *prompt = PROMPT;
     char splitch = '\n';
+
+    char *preview_cmd = NULL;
+    int ratio_menu = 3;
+    int ratio_preview = 4;
 
     if (argc > 1) {
         for(int i = 1; i < argc; i++) {
@@ -219,6 +273,19 @@ int main(int argc, char **argv) {
             } else
             if (strcmp(argv[i], "-char") == 0 && i + 1 < argc) {
                 splitch = *argv[++i];
+                continue;
+            } else
+            if (strcmp(argv[i], "-preview") == 0 && i + 1 < argc) {
+                preview_cmd = argv[++i];
+                continue;
+            } else
+            if (strcmp(argv[i], "-preview-ratio") == 0 && i + 1 < argc) {
+                char *ratio_str = argv[++i];
+                if (sscanf(ratio_str, "%d:%d", &ratio_menu, &ratio_preview) != 2 || ratio_menu <= 0 || ratio_preview < 0 || (ratio_menu + ratio_preview) <= 0) {
+                    fprintf(stderr, "warning: invalid preview ratio format, using 3:4.\n");
+                    ratio_menu = 3;
+                    ratio_preview = 4;
+                }
                 continue;
             } else
             if (strcmp(argv[i], "-help") == 0) print_help();
@@ -273,6 +340,16 @@ int main(int argc, char **argv) {
     mx = getmaxx(stdscr);
     my = getmaxy(stdscr);
 
+    size_t preview_w = 0;
+    size_t menu_w = mx;
+
+    if (preview_cmd != NULL) {
+        int total_ratio = ratio_menu + ratio_preview;
+        menu_w = (mx * ratio_menu) / total_ratio;
+        if (menu_w == 0) menu_w = 1;
+        preview_w = mx - menu_w;
+    }
+
     init_pair(1, fg_color, bg_color);
 
     // Init readline (callback / alternate interface)
@@ -299,7 +376,7 @@ int main(int argc, char **argv) {
 
         size_t prompt_width = strlen(prompt);
         size_t input_len    = prompt_width + strnwidth(line_buf, line_sz, prompt_width);
-        size_t input_rows   = (input_len + mx - 1) / mx;
+        size_t input_rows   = (input_len + menu_w - 1) / menu_w;
         if (input_rows == 0) input_rows = 1;
 
         size_t max_visible = (my > input_rows) ? (my - input_rows) : 0;
@@ -340,10 +417,10 @@ int main(int argc, char **argv) {
         helpa_da_foreach(*current_display, items) {
             if (index >= scroll_offset && index < scroll_offset + max_visible) {
                 int len = (int)items->entry.sz;
-                if ((size_t)len > mx) len = (int)mx;
+                if ((size_t)len > menu_w) len = (int)menu_w;
                 mvaddnstr((int)row, 0, (const char *)items->entry.dt, len);
                 if (index == selected)
-                    mvchgat((int)row, 0, -1, A_NORMAL, 1, NULL);
+                    mvchgat((int)row, 0, (int)menu_w, A_NORMAL, 1, NULL);
                 row++;
             }
             index++;
@@ -351,14 +428,88 @@ int main(int argc, char **argv) {
 
         mvaddstr(0, 0, prompt);
         addstr(line_buf);
-        wclrtoeol(stdscr);
+
+        // Clear to end of line, but only up to menu_w
+        int cur_x = getcurx(stdscr);
+        for (size_t i = cur_x; i < menu_w; i++) {
+            addch(' ');
+        }
 
         size_t cursor_col = prompt_width +
             strnwidth(line_buf, (size_t)rl_point, prompt_width);
-        if (cursor_col < mx)
+        if (cursor_col < menu_w)
             move(0, (int)cursor_col);
 
         refresh();
+
+        // Draw the preview window
+        if (preview_cmd != NULL && preview_w > 0) {
+            // Clear the preview area using ANSI escape codes
+            for (size_t y = 0; y < my; y++) {
+                printf("\033[%zu;%zuH\033[K", y + 1, menu_w + 1);
+            }
+
+            if (current_display->sz > 0) {
+                HStrView sel = current_display->dt[selected].entry;
+                HStr preview_out = execute_preview(preview_cmd, sel);
+
+                if (preview_out.sz > 0) {
+                    size_t p_y = 1;
+                    size_t p_x = menu_w + 1;
+                    printf("\033[%zu;%zuH", p_y, p_x);
+
+                    size_t cur_x_offset = 0;
+                    int escape_state = 0; // 0 = normal, 1 = saw ESC, 2 = CSI ([), 3 = DCS (P) or OSC (]), 4 = string processing
+
+                    for (size_t i = 0; i < preview_out.sz; i++) {
+                        u8 c = preview_out.dt[i];
+
+                        if (escape_state == 0 && c == '\033') {
+                            escape_state = 1;
+                        }
+
+                        if (escape_state > 0) {
+                            putchar(c);
+                            if (escape_state == 1) {
+                                if (c == '[') escape_state = 2; // CSI
+                                else if (c == 'P' || c == ']' || c == '_' || c == '^') escape_state = 4; // DCS, OSC, APC, PM
+                                else if (c != '\033') escape_state = 0; // Other short escapes like ESC M
+                            } else if (escape_state == 2) {
+                                if (isalpha(c)) escape_state = 0; // End of CSI
+                            } else if (escape_state == 4) {
+                                // Looking for String Terminator (ESC \) or BEL (\x07)
+                                if (c == '\x07') escape_state = 0;
+                                else if (c == '\\' && i > 0 && preview_out.dt[i-1] == '\033') escape_state = 0;
+                            }
+                        } else {
+                            if (c == '\n') {
+                                p_y++;
+                                if (p_y > my) break;
+                                printf("\033[%zu;%zuH", p_y, p_x);
+                                cur_x_offset = 0;
+                            } else if (c == '\r') {
+                                printf("\033[%zu;%zuH", p_y, p_x);
+                                cur_x_offset = 0;
+                            } else {
+                                if (cur_x_offset < preview_w) {
+                                    putchar(c);
+                                    cur_x_offset++;
+                                }
+                            }
+                        }
+                    }
+                }
+                hstr_free(&preview_out);
+            }
+
+            // Move cursor back to input line
+            if (cursor_col < menu_w)
+                printf("\033[1;%zuH", cursor_col + 1);
+            else
+                printf("\033[1;%zuH", menu_w + 1);
+
+            fflush(stdout);
+        }
 
         wint_t wch = 0;
         int ret = get_wch(&wch);
@@ -372,6 +523,15 @@ int main(int argc, char **argv) {
                 case KEY_RESIZE: {
                     mx = getmaxx(stdscr);
                     my = getmaxy(stdscr);
+                    if (preview_cmd != NULL) {
+                        int total_ratio = ratio_menu + ratio_preview;
+                        menu_w = (mx * ratio_menu) / total_ratio;
+                        if (menu_w == 0) menu_w = 1;
+                        preview_w = mx - menu_w;
+                    } else {
+                        menu_w = mx;
+                        preview_w = 0;
+                    }
                 } break;
                 case KEY_BACKSPACE: {
                     changed = true;
