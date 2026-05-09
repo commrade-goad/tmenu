@@ -6,8 +6,8 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <locale.h>
-// #include <curses.h>
-#include <ncursesw/curses.h>
+#include <curses.h>
+// #include <cursesw.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <wchar.h>
